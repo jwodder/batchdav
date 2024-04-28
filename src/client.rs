@@ -1,5 +1,5 @@
 use crate::types::DirectoryListing;
-use crate::xml::parse_propfind_response;
+use crate::xml::parse_multistatus;
 use indoc::indoc;
 use mime::Mime;
 use reqwest::Method;
@@ -62,7 +62,7 @@ impl Client {
             .error_for_status()?;
         let charset = get_charset(&r);
         let resp = r.bytes().await?;
-        let mut dl = parse_propfind_response(resp, charset)?.paths_to_urls(&self.base_url);
+        let mut dl = parse_multistatus(resp, charset)?.paths_to_urls(&self.base_url);
         dl.directories.retain(|u| !is_collection_url(&url, u));
         Ok(dl)
     }
