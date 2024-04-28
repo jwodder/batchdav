@@ -12,6 +12,10 @@ exclude = ["/.*"]
 publish = false
 
 [dependencies]
+anyhow = "1.0.82"
+reqwest = "0.12.4"
+thiserror = "1.0.59"
+url = "2.5.0"
 
 [lints.rust]
 # Lint groups:
