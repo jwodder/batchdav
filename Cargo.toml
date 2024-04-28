@@ -14,10 +14,12 @@ publish = false
 [dependencies]
 anyhow = "1.0.82"
 bytes = "1.6.0"
+futures-util = { version = "0.3.30", default-features = false, features = ["std"] }
 indoc = "2.0.5"
 mime = "0.3.17"
 reqwest = "0.12.4"
 thiserror = "1.0.59"
+tokio = { version = "1.37.0", features = ["rt", "rt-multi-thread", "sync"] }
 url = "2.5.0"
 winnow = "0.6.7"
 xml-rs = "0.8.20"
