@@ -1,3 +1,4 @@
+use crate::types::DirectoryListing;
 use thiserror::Error;
 use url::Url;
 
@@ -27,7 +28,7 @@ impl Client {
     }
 
     // Assume `url` has `base_url` as a prefix
-    pub(crate) async fn list_directory(&self, url: Url) -> anyhow::Result<DirectoryListing> {
+    pub(crate) async fn list_directory(&self, url: Url) -> anyhow::Result<DirectoryListing<Url>> {
         todo!()
     }
 
@@ -50,9 +51,3 @@ impl Client {
 #[derive(Debug, Error)]
 #[error("failed to initialize HTTP client")]
 pub(crate) struct BuildClientError(#[source] reqwest::Error);
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct DirectoryListing {
-    pub(crate) directories: Vec<Url>,
-    pub(crate) files: Vec<Url>,
-}
