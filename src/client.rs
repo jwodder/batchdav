@@ -1,6 +1,7 @@
 use crate::types::DirectoryListing;
 use crate::xml::parse_propfind_response;
 use indoc::indoc;
+use mime::Mime;
 use reqwest::Method;
 use thiserror::Error;
 use url::Url;
@@ -50,7 +51,7 @@ impl Client {
 
     // Assume `url` has `base_url` as a prefix
     pub(crate) async fn list_directory(&self, url: Url) -> anyhow::Result<DirectoryListing<Url>> {
-        let resp = self
+        let r = self
             .inner
             .request(self.propfind.clone(), url.clone())
             .header(reqwest::header::CONTENT_TYPE, REQUEST_CONTENT_TYPE)
@@ -58,10 +59,10 @@ impl Client {
             .body(REQUEST_BODY)
             .send()
             .await?
-            .error_for_status()?
-            .text_with_charset("utf-8")
-            .await?;
-        let mut dl = parse_propfind_response(&resp)?.paths_to_urls(&self.base_url);
+            .error_for_status()?;
+        let charset = get_charset(&r);
+        let resp = r.bytes().await?;
+        let mut dl = parse_propfind_response(resp, charset)?.paths_to_urls(&self.base_url);
         dl.directories.retain(|u| !is_collection_url(&url, u));
         Ok(dl)
     }
@@ -88,4 +89,15 @@ pub(crate) struct BuildClientError(#[source] reqwest::Error);
 
 fn is_collection_url(colurl: &Url, url: &Url) -> bool {
     colurl.as_str().trim_end_matches('/') == url.as_str().trim_end_matches('/')
+}
+
+fn get_charset(r: &reqwest::Response) -> Option<String> {
+    r.headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<Mime>().ok())
+        .and_then(|ct| {
+            ct.get_param("charset")
+                .map(|charset| charset.as_str().to_owned())
+        })
 }

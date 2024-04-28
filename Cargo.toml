@@ -13,10 +13,13 @@ publish = false
 
 [dependencies]
 anyhow = "1.0.82"
+bytes = "1.6.0"
 indoc = "2.0.5"
-reqwest = { version = "0.12.4", features = ["charset"] }
+mime = "0.3.17"
+reqwest = "0.12.4"
 thiserror = "1.0.59"
 url = "2.5.0"
+xml-rs = "0.8.20"
 
 [dev-dependencies]
 rstest = { version = "0.19.0", default-features = false }
