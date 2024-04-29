@@ -11,7 +11,7 @@ pub(crate) struct BoundedTreeNursery<T> {
 }
 
 impl<T: Send + 'static> BoundedTreeNursery<T> {
-    pub(crate) fn new<F, Fut>(limit: usize, top: F) -> Self
+    pub(crate) fn new<F, Fut>(limit: usize, root: F) -> Self
     where
         F: FnOnce(Spawner<T>) -> Fut + Send + 'static,
         Fut: Future<Output = T> + Send + 'static,
@@ -22,7 +22,7 @@ impl<T: Send + 'static> BoundedTreeNursery<T> {
             semaphore,
             tasks: tasks.clone(),
         };
-        spawner.spawn_with_self(top);
+        spawner.spawn_with_self(root);
         BoundedTreeNursery { tasks }
     }
 }
@@ -38,24 +38,21 @@ impl<T: 'static> Stream for BoundedTreeNursery<T> {
             Ok(tasks) => tasks,
             Err(e) => e.into_inner(),
         };
-        loop {
-            match ready!(tasks.poll_join_next(cx)) {
-                Some(Ok(r)) => return Some(r).into(),
-                Some(Err(e)) => {
-                    if let Ok(barf) = e.try_into_panic() {
-                        std::panic::resume_unwind(barf);
-                    }
-                    // else: task was aborted; loop around & poll again
-                    // TODO: Treat this as unreachable?
-                }
-                None => {
-                    if Arc::strong_count(&self.tasks) == 1 {
-                        // All spawners dropped and all results yielded; end of
-                        // stream
-                        return None.into();
-                    } else {
-                        return Poll::Pending;
-                    }
+        match ready!(tasks.poll_join_next(cx)) {
+            Some(Ok(r)) => Some(r).into(),
+            Some(Err(e)) => match e.try_into_panic() {
+                Ok(barf) => std::panic::resume_unwind(barf),
+                Err(e) => unreachable!(
+                    "Task in BoundedTreeNursery should not have been aborted, but got {e:?}"
+                ),
+            },
+            None => {
+                if Arc::strong_count(&self.tasks) == 1 {
+                    // All spawners dropped and all results yielded; end of
+                    // stream
+                    None.into()
+                } else {
+                    Poll::Pending
                 }
             }
         }
