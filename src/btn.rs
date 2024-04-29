@@ -1,7 +1,7 @@
 use futures_util::Stream;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{ready, Context, Poll};
 use tokio::{sync::Semaphore, task::JoinSet};
 
@@ -34,10 +34,7 @@ impl<T: 'static> Stream for BoundedTreeNursery<T> {
     ///
     /// If a task panics, this method resumes unwinding the panic.
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<T>> {
-        let mut tasks = match self.tasks.lock() {
-            Ok(tasks) => tasks,
-            Err(e) => e.into_inner(),
-        };
+        let mut tasks = self.tasks.lock().unwrap_or_else(PoisonError::into_inner);
         match ready!(tasks.poll_join_next(cx)) {
             Some(Ok(r)) => Some(r).into(),
             Some(Err(e)) => match e.try_into_panic() {
@@ -92,10 +89,7 @@ impl<T: Send + 'static> Spawner<T> {
     {
         let semaphore = self.semaphore.clone();
         let tasks = self.tasks.clone();
-        let mut tasks = match tasks.lock() {
-            Ok(tasks) => tasks,
-            Err(e) => e.into_inner(),
-        };
+        let mut tasks = tasks.lock().unwrap_or_else(PoisonError::into_inner);
         tasks.spawn(async move {
             let Ok(_permit) = semaphore.acquire().await else {
                 unreachable!("Semaphore should not be closed");
