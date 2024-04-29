@@ -4,7 +4,7 @@ use thiserror::Error;
 use winnow::{
     combinator::{delimited, opt, preceded, repeat, seq},
     error::{ContextError, ErrMode, ErrorKind, ParserError},
-    stream::{Compare, CompareResult, ContainsToken, SliceLen},
+    stream::{Compare, CompareResult, SliceLen},
     token::literal,
     PResult, Parser,
 };
@@ -58,35 +58,8 @@ impl Compare<Token> for &[Token] {
     }
 }
 
-impl ContainsToken<Token> for Token {
-    #[inline(always)]
-    fn contains_token(&self, token: Token) -> bool {
-        *self == token
-    }
-}
-
-impl ContainsToken<Token> for &[Token] {
-    #[inline]
-    fn contains_token(&self, token: Token) -> bool {
-        self.iter().any(|t| *t == token)
-    }
-}
-
-impl<const N: usize> ContainsToken<Token> for [Token; N] {
-    #[inline]
-    fn contains_token(&self, token: Token) -> bool {
-        self.iter().any(|t| *t == token)
-    }
-}
-
-impl<const N: usize> ContainsToken<Token> for &[Token; N] {
-    #[inline]
-    fn contains_token(&self, token: Token) -> bool {
-        self.iter().any(|t| *t == token)
-    }
-}
-
 impl SliceLen for Token {
+    #[inline(always)]
     fn slice_len(&self) -> usize {
         1
     }
