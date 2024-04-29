@@ -6,6 +6,7 @@ use crate::btn::{BoundedTreeNursery, Spawner};
 use crate::client::Client;
 use clap::{Parser, Subcommand};
 use futures_util::{future::BoxFuture, FutureExt, TryStreamExt};
+use std::fmt;
 use std::time::Instant;
 use url::Url;
 
@@ -45,13 +46,7 @@ async fn main() -> anyhow::Result<()> {
             while let Some(r) = stream.try_next().await? {
                 requests += 1;
                 if !quiet {
-                    if let Report::File { url, target } = r {
-                        println!(
-                            "{} -> {}",
-                            url,
-                            target.as_ref().map_or("<NOT A REDIRECT>", Url::as_str)
-                        );
-                    }
+                    println!("{r}");
                 }
             }
             let elapsed = start.elapsed();
@@ -63,8 +58,21 @@ async fn main() -> anyhow::Result<()> {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Report {
-    Dir,
+    Dir(Url),
     File { url: Url, target: Option<Url> },
+}
+
+impl fmt::Display for Report {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Report::Dir(url) => write!(f, "DIR: {url}"),
+            Report::File { url, target: None } => write!(f, "FILE: {url} => <NOT A REDIRECT>"),
+            Report::File {
+                url,
+                target: Some(t),
+            } => write!(f, "FILE: {url} => {t}"),
+        }
+    }
 }
 
 fn process_dir(
@@ -73,7 +81,7 @@ fn process_dir(
     url: Url,
 ) -> BoxFuture<'static, anyhow::Result<Report>> {
     async move {
-        let dl = client.list_directory(url).await?;
+        let dl = client.list_directory(url.clone()).await?;
         for d in dl.directories {
             let cl2 = client.clone();
             spawner
@@ -84,7 +92,7 @@ fn process_dir(
             let cl2 = client.clone();
             spawner.spawn(move |_spawner| process_file(cl2, f)).await;
         }
-        Ok(Report::Dir)
+        Ok(Report::Dir(url))
     }
     .boxed()
 }
