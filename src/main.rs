@@ -79,6 +79,8 @@ fn process_dir(
     client: Client,
     url: Url,
 ) -> BoxFuture<'static, anyhow::Result<Report>> {
+    // We need to return a boxed Future in order to be able to call
+    // `process_dir()` inside itself.
     async move {
         let dl = client.list_directory(url.clone()).await?;
         for d in dl.directories {
