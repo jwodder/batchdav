@@ -5,12 +5,25 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{ready, Context, Poll};
 use tokio::{sync::Semaphore, task::JoinSet};
 
+/// A task group with the following properties:
+///
+/// - No more than a certain number of tasks are ever active at once.
+///
+/// - Each task is passed a `Spawner` that can be used to spawn more tasks in
+///   the group.
+///
+/// - `BoundedTreeNursery<T>` is a `Stream` of the return values of the tasks
+///   (which must all be `T`).
+///
+/// - Dropping `BoundedTreeNursery` causes all tasks to be aborted.
 #[derive(Clone, Debug)]
 pub(crate) struct BoundedTreeNursery<T> {
     tasks: Arc<Mutex<JoinSet<T>>>,
 }
 
 impl<T: Send + 'static> BoundedTreeNursery<T> {
+    /// Create a `BoundedTreeNursery` that limits the number of active tasks to
+    /// at most `limit` and with `root` spawned as the initial task
     pub(crate) fn new<F, Fut>(limit: usize, root: F) -> Self
     where
         F: FnOnce(Spawner<T>) -> Fut + Send + 'static,
@@ -30,6 +43,9 @@ impl<T: Send + 'static> BoundedTreeNursery<T> {
 impl<T: 'static> Stream for BoundedTreeNursery<T> {
     type Item = T;
 
+    /// Poll for one of the tasks in the group to complete and return its
+    /// return value.
+    ///
     /// # Panics
     ///
     /// If a task panics, this method resumes unwinding the panic.
@@ -56,6 +72,7 @@ impl<T: 'static> Stream for BoundedTreeNursery<T> {
     }
 }
 
+/// A handle for spawning tasks in a `BoundedTreeNursery<T>`
 #[derive(Debug)]
 pub(crate) struct Spawner<T> {
     semaphore: Arc<Semaphore>,
@@ -74,6 +91,7 @@ impl<T> Clone for Spawner<T> {
 }
 
 impl<T: Send + 'static> Spawner<T> {
+    /// Spawn the given task in the task group, passing it a new `Spawner`
     pub(crate) fn spawn<F, Fut>(&self, func: F)
     where
         F: FnOnce(Spawner<T>) -> Fut + Send + 'static,
@@ -82,6 +100,7 @@ impl<T: Send + 'static> Spawner<T> {
         self.clone().spawn_with_self(func);
     }
 
+    /// Spawn the given task in the task group, passing it this `Spawner`
     fn spawn_with_self<F, Fut>(self, func: F)
     where
         F: FnOnce(Spawner<T>) -> Fut + Send + 'static,
