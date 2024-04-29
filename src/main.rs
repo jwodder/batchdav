@@ -38,8 +38,8 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let client = Client::new(base_url.clone())?;
             let start = Instant::now();
-            let mut stream = BoundedTreeNursery::new(workers, move |spawner| async move {
-                process_dir(spawner, client, base_url).await
+            let mut stream = BoundedTreeNursery::new(workers, move |spawner| {
+                process_dir(spawner, client, base_url)
             })
             .await;
             let mut requests = 0;
