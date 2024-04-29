@@ -12,6 +12,7 @@ use std::num::NonZeroUsize;
 use std::time::{Duration, Instant};
 use url::Url;
 
+/// Traverse WebDAV hierarchies using concurrent tasks
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
 struct Arguments {
     #[command(subcommand)]
@@ -20,20 +21,29 @@ struct Arguments {
 
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
 enum Command {
+    /// Traverse a hierarchy once
     Run {
+        /// Do not print details on each request as it's completed
         #[arg(short, long)]
         quiet: bool,
 
+        /// The root URL of the hierarchy
         base_url: Url,
 
+        /// Maximum number of tasks to have active at once
         workers: usize,
     },
+
+    /// Traverse a hierarchy multiple times and summarize the results
     Batch {
+        /// Number of traversals to make for each number of workers
         #[arg(short, long, default_value = "10")]
         samples: NonZeroUsize,
 
+        /// The root URL of the hierarchy
         base_url: Url,
 
+        /// Varying worker amounts to run the traversal with
         workers_list: Vec<usize>,
     },
 }
