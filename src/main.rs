@@ -6,8 +6,10 @@ use crate::btn::{BoundedTreeNursery, Spawner};
 use crate::client::Client;
 use clap::{Parser, Subcommand};
 use futures_util::{future::BoxFuture, FutureExt, TryStreamExt};
+use statrs::statistics::{Data, Distribution};
 use std::fmt;
-use std::time::Instant;
+use std::num::NonZeroUsize;
+use std::time::{Duration, Instant};
 use url::Url;
 
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
@@ -26,6 +28,14 @@ enum Command {
 
         workers: usize,
     },
+    Batch {
+        #[arg(short, long, default_value = "10")]
+        samples: NonZeroUsize,
+
+        base_url: Url,
+
+        workers_list: Vec<usize>,
+    },
 }
 
 #[tokio::main]
@@ -37,22 +47,70 @@ async fn main() -> anyhow::Result<()> {
             workers,
         } => {
             let client = Client::new(base_url.clone())?;
-            let start = Instant::now();
-            let mut stream = BoundedTreeNursery::new(workers, move |spawner| {
-                process_dir(spawner, client, base_url)
-            });
-            let mut requests = 0;
-            while let Some(r) = stream.try_next().await? {
-                requests += 1;
-                if !quiet {
-                    println!("{r}");
-                }
-            }
-            let elapsed = start.elapsed();
+            let TraversalReport { requests, elapsed } =
+                traverse(client, base_url, workers, quiet).await?;
             println!("Performed {requests} requests in {elapsed:?}");
+        }
+        Command::Batch {
+            samples,
+            base_url,
+            workers_list,
+        } => {
+            let client = Client::new(base_url.clone())?;
+            let mut stats = Vec::new();
+            for workers in workers_list {
+                let mut times = Vec::new();
+                for i in 1..=samples.into() {
+                    let TraversalReport { elapsed, .. } =
+                        traverse(client.clone(), base_url.clone(), workers, true).await?;
+                    eprintln!("Finished: workers = {workers}, run = {i}, elapsed = {elapsed:?}");
+                    times.push(elapsed.as_secs_f64());
+                }
+                let data = Data::new(times);
+                let mean = data
+                    .mean()
+                    .expect("mean should exist for nonzero number of samples");
+                let stddev = data
+                    .std_dev()
+                    .expect("stddev should exist for nonzero number of samples");
+                stats.push((workers, mean, stddev));
+            }
+            println!("workers,time_mean,time_stddev");
+            for (workers, time_mean, time_stddev) in stats {
+                println!("{workers},{time_mean},{time_stddev}");
+            }
         }
     }
     Ok(())
+}
+
+async fn traverse(
+    client: Client,
+    base_url: Url,
+    workers: usize,
+    quiet: bool,
+) -> anyhow::Result<TraversalReport> {
+    let start = Instant::now();
+    let mut stream = BoundedTreeNursery::new(workers, move |spawner| {
+        process_dir(spawner, client, base_url)
+    });
+    let mut requests = 0;
+    while let Some(r) = stream.try_next().await? {
+        requests += 1;
+        if !quiet {
+            println!("{r}");
+        }
+    }
+    Ok(TraversalReport {
+        requests,
+        elapsed: start.elapsed(),
+    })
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TraversalReport {
+    requests: usize,
+    elapsed: Duration,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
