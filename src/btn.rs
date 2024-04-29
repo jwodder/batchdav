@@ -1,12 +1,9 @@
 use futures_util::Stream;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::{ready, Context, Poll};
-use tokio::{
-    sync::{Mutex, Semaphore},
-    task::JoinSet,
-};
+use tokio::{sync::Semaphore, task::JoinSet};
 
 #[derive(Clone, Debug)]
 pub(crate) struct BoundedTreeNursery<T> {
@@ -14,7 +11,7 @@ pub(crate) struct BoundedTreeNursery<T> {
 }
 
 impl<T: Send + 'static> BoundedTreeNursery<T> {
-    pub(crate) async fn new<F, Fut>(limit: usize, top: F) -> Self
+    pub(crate) fn new<F, Fut>(limit: usize, top: F) -> Self
     where
         F: FnOnce(Spawner<T>) -> Fut + Send + 'static,
         Fut: Future<Output = T> + Send + 'static,
@@ -25,7 +22,7 @@ impl<T: Send + 'static> BoundedTreeNursery<T> {
             semaphore,
             tasks: tasks.clone(),
         };
-        spawner.spawn_with_self(top).await;
+        spawner.spawn_with_self(top);
         BoundedTreeNursery { tasks }
     }
 }
@@ -37,8 +34,9 @@ impl<T: 'static> Stream for BoundedTreeNursery<T> {
     ///
     /// If a task panics, this method resumes unwinding the panic.
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<T>> {
-        let Ok(mut tasks) = self.tasks.try_lock() else {
-            return Poll::Pending;
+        let mut tasks = match self.tasks.lock() {
+            Ok(tasks) => tasks,
+            Err(e) => e.into_inner(),
         };
         loop {
             match ready!(tasks.poll_join_next(cx)) {
@@ -48,6 +46,7 @@ impl<T: 'static> Stream for BoundedTreeNursery<T> {
                         std::panic::resume_unwind(barf);
                     }
                     // else: task was aborted; loop around & poll again
+                    // TODO: Treat this as unreachable?
                 }
                 None => {
                     if Arc::strong_count(&self.tasks) == 1 {
@@ -81,21 +80,26 @@ impl<T> Clone for Spawner<T> {
 }
 
 impl<T: Send + 'static> Spawner<T> {
-    pub(crate) async fn spawn<F, Fut>(&self, func: F)
+    pub(crate) fn spawn<F, Fut>(&self, func: F)
     where
         F: FnOnce(Spawner<T>) -> Fut + Send + 'static,
         Fut: Future<Output = T> + Send + 'static,
     {
-        self.clone().spawn_with_self(func).await;
+        self.clone().spawn_with_self(func);
     }
 
-    async fn spawn_with_self<F, Fut>(self, func: F)
+    fn spawn_with_self<F, Fut>(self, func: F)
     where
         F: FnOnce(Spawner<T>) -> Fut + Send + 'static,
         Fut: Future<Output = T> + Send + 'static,
     {
         let semaphore = self.semaphore.clone();
-        self.tasks.clone().lock().await.spawn(async move {
+        let tasks = self.tasks.clone();
+        let mut tasks = match tasks.lock() {
+            Ok(tasks) => tasks,
+            Err(e) => e.into_inner(),
+        };
+        tasks.spawn(async move {
             let Ok(_permit) = semaphore.acquire().await else {
                 unreachable!("Semaphore should not be closed");
             };

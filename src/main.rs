@@ -40,8 +40,7 @@ async fn main() -> anyhow::Result<()> {
             let start = Instant::now();
             let mut stream = BoundedTreeNursery::new(workers, move |spawner| {
                 process_dir(spawner, client, base_url)
-            })
-            .await;
+            });
             let mut requests = 0;
             while let Some(r) = stream.try_next().await? {
                 requests += 1;
@@ -84,13 +83,11 @@ fn process_dir(
         let dl = client.list_directory(url.clone()).await?;
         for d in dl.directories {
             let cl2 = client.clone();
-            spawner
-                .spawn(move |spawner| Box::pin(process_dir(spawner, cl2, d)))
-                .await;
+            spawner.spawn(move |spawner| Box::pin(process_dir(spawner, cl2, d)));
         }
         for f in dl.files {
             let cl2 = client.clone();
-            spawner.spawn(move |_spawner| process_file(cl2, f)).await;
+            spawner.spawn(move |_spawner| process_file(cl2, f));
         }
         Ok(Report::Dir(url))
     }
