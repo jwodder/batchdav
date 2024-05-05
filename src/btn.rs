@@ -1,4 +1,4 @@
-use futures_util::Stream;
+use futures_util::{stream::FuturesUnordered, Stream, StreamExt};
 use pin_project_lite::pin_project;
 use std::future::Future;
 use std::pin::Pin;
@@ -9,7 +9,7 @@ use tokio::{
         mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
         Semaphore,
     },
-    task::{JoinError, JoinHandle, JoinSet},
+    task::{JoinError, JoinHandle},
 };
 
 /// A task group with the following properties:
@@ -26,7 +26,7 @@ use tokio::{
 #[derive(Debug)]
 pub(crate) struct BoundedTreeNursery<T> {
     receiver: UnboundedReceiver<FragileHandle<T>>,
-    tasks: JoinSet<Result<T, JoinError>>,
+    tasks: FuturesUnordered<FragileHandle<T>>,
     closed: bool,
 }
 
@@ -43,7 +43,7 @@ impl<T: Send + 'static> BoundedTreeNursery<T> {
         let spawner = Spawner { semaphore, sender };
         spawner.spawn_with_self(root);
         BoundedTreeNursery {
-            tasks: JoinSet::new(),
+            tasks: FuturesUnordered::new(),
             receiver,
             closed: false,
         }
@@ -64,15 +64,11 @@ impl<T: Send + 'static> Stream for BoundedTreeNursery<T> {
         match self.receiver.poll_recv_many(cx, &mut buf, 32) {
             Poll::Pending => (),
             Poll::Ready(0) => self.closed = true,
-            Poll::Ready(_) => {
-                for handle in buf {
-                    self.tasks.spawn(handle);
-                }
-            }
+            Poll::Ready(_) => self.tasks.extend(buf),
         }
-        match ready!(self.tasks.poll_join_next(cx)) {
-            Some(Ok(Ok(r))) => Some(r).into(),
-            Some(Ok(Err(e)) | Err(e)) => match e.try_into_panic() {
+        match ready!(self.tasks.poll_next_unpin(cx)) {
+            Some(Ok(r)) => Some(r).into(),
+            Some(Err(e)) => match e.try_into_panic() {
                 Ok(barf) => std::panic::resume_unwind(barf),
                 Err(e) => unreachable!(
                     "Task in BoundedTreeNursery should not have been aborted, but got {e:?}"
