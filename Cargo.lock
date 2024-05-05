@@ -84,6 +84,7 @@ dependencies = [
  "futures-util",
  "indoc",
  "mime",
+ "pin-project-lite",
  "reqwest",
  "rstest",
  "statrs",
