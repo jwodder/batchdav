@@ -59,7 +59,7 @@ async fn main() -> anyhow::Result<()> {
             let client = Client::new(base_url.clone())?;
             let TraversalReport { requests, elapsed } =
                 traverse(client, base_url, workers, quiet).await?;
-            println!("Performed {requests} requests in {elapsed:?}");
+            println!("Performed {requests} requests with {workers} workers in {elapsed:?}");
         }
         Command::Batch {
             samples,
