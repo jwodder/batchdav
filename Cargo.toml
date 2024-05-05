@@ -2,7 +2,7 @@
 name = "batchdav"
 version = "0.1.0-dev"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.74"
 description = "Traverse WebDAV hierarchies using concurrent tasks"
 authors = ["John Thorvald Wodder II <batchdav@varonathe.org>"]
 repository = "https://github.com/jwodder/batchdav"
