@@ -60,11 +60,16 @@ impl<T: Send + 'static> Stream for BoundedTreeNursery<T> {
     ///
     /// If a task panics, this method resumes unwinding the panic.
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<T>> {
-        let mut buf = Vec::new();
-        match self.receiver.poll_recv_many(cx, &mut buf, 32) {
-            Poll::Pending => (),
-            Poll::Ready(0) => self.closed = true,
-            Poll::Ready(_) => self.tasks.extend(buf),
+        loop {
+            let mut buf = Vec::with_capacity(32);
+            match self.receiver.poll_recv_many(cx, &mut buf, 32) {
+                Poll::Pending => break,
+                Poll::Ready(0) => {
+                    self.closed = true;
+                    break;
+                }
+                Poll::Ready(_) => self.tasks.extend(buf),
+            }
         }
         match ready!(self.tasks.poll_next_unpin(cx)) {
             Some(Ok(r)) => Some(r).into(),
