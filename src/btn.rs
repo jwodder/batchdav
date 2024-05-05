@@ -1,9 +1,13 @@
 use futures_util::Stream;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, PoisonError};
-use std::task::{ready, Context, Poll};
-use tokio::{sync::Semaphore, task::JoinSet};
+use std::sync::Arc;
+use std::task::{Context, Poll};
+use tokio::sync::{
+    mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
+    Semaphore,
+};
+use tokio_util::sync::{CancellationToken, DropGuard};
 
 /// A task group with the following properties:
 ///
@@ -16,9 +20,10 @@ use tokio::{sync::Semaphore, task::JoinSet};
 ///   (which must all be `T`).
 ///
 /// - Dropping `BoundedTreeNursery` causes all tasks to be aborted.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct BoundedTreeNursery<T> {
-    tasks: Arc<Mutex<JoinSet<T>>>,
+    receiver: UnboundedReceiver<T>,
+    _on_drop: DropGuard,
 }
 
 impl<T: Send + 'static> BoundedTreeNursery<T> {
@@ -30,13 +35,19 @@ impl<T: Send + 'static> BoundedTreeNursery<T> {
         Fut: Future<Output = T> + Send + 'static,
     {
         let semaphore = Arc::new(Semaphore::new(limit));
-        let tasks = Arc::new(Mutex::new(JoinSet::new()));
+        let token = CancellationToken::new();
+        let on_drop = token.clone().drop_guard();
+        let (sender, receiver) = unbounded_channel();
         let spawner = Spawner {
             semaphore,
-            tasks: tasks.clone(),
+            sender,
+            token,
         };
         spawner.spawn_with_self(root);
-        BoundedTreeNursery { tasks }
+        BoundedTreeNursery {
+            receiver,
+            _on_drop: on_drop,
+        }
     }
 }
 
@@ -49,26 +60,8 @@ impl<T: 'static> Stream for BoundedTreeNursery<T> {
     /// # Panics
     ///
     /// If a task panics, this method resumes unwinding the panic.
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<T>> {
-        let mut tasks = self.tasks.lock().unwrap_or_else(PoisonError::into_inner);
-        match ready!(tasks.poll_join_next(cx)) {
-            Some(Ok(r)) => Some(r).into(),
-            Some(Err(e)) => match e.try_into_panic() {
-                Ok(barf) => std::panic::resume_unwind(barf),
-                Err(e) => unreachable!(
-                    "Task in BoundedTreeNursery should not have been aborted, but got {e:?}"
-                ),
-            },
-            None => {
-                if Arc::strong_count(&self.tasks) == 1 {
-                    // All spawners dropped and all results yielded; end of
-                    // stream
-                    None.into()
-                } else {
-                    Poll::Pending
-                }
-            }
-        }
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<T>> {
+        self.receiver.poll_recv(cx)
     }
 }
 
@@ -76,7 +69,8 @@ impl<T: 'static> Stream for BoundedTreeNursery<T> {
 #[derive(Debug)]
 pub(crate) struct Spawner<T> {
     semaphore: Arc<Semaphore>,
-    tasks: Arc<Mutex<JoinSet<T>>>,
+    sender: UnboundedSender<T>,
+    token: CancellationToken,
 }
 
 // Clone can't be derived, as that would erroneously add `T: Clone` bounds to
@@ -85,7 +79,8 @@ impl<T> Clone for Spawner<T> {
     fn clone(&self) -> Spawner<T> {
         Spawner {
             semaphore: self.semaphore.clone(),
-            tasks: self.tasks.clone(),
+            sender: self.sender.clone(),
+            token: self.token.clone(),
         }
     }
 }
@@ -106,14 +101,24 @@ impl<T: Send + 'static> Spawner<T> {
         F: FnOnce(Spawner<T>) -> Fut + Send + 'static,
         Fut: Future<Output = T> + Send + 'static,
     {
-        let semaphore = self.semaphore.clone();
-        let tasks = self.tasks.clone();
-        let mut tasks = tasks.lock().unwrap_or_else(PoisonError::into_inner);
-        tasks.spawn(async move {
+        let Spawner {
+            semaphore,
+            sender,
+            token,
+        } = self.clone();
+        let fut = async move {
             let Ok(_permit) = semaphore.acquire().await else {
                 unreachable!("Semaphore should not be closed");
             };
             func(self).await
+        };
+        tokio::spawn(async move {
+            tokio::select!(
+                () = token.cancelled() => (),
+                r = fut => {
+                    let _ = sender.send(r);
+                }
+            );
         });
     }
 }
