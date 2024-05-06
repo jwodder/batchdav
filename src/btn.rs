@@ -1,13 +1,15 @@
-use futures_util::Stream;
+use futures_util::{FutureExt, Stream};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
+use std::task::{ready, Context, Poll};
 use tokio::sync::{
     mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
     Semaphore,
 };
 use tokio_util::sync::{CancellationToken, DropGuard};
+
+type UnwindResult<T> = Result<T, Box<dyn std::any::Any + Send>>;
 
 /// A task group with the following properties:
 ///
@@ -22,7 +24,7 @@ use tokio_util::sync::{CancellationToken, DropGuard};
 /// - Dropping `BoundedTreeNursery` causes all tasks to be aborted.
 #[derive(Debug)]
 pub(crate) struct BoundedTreeNursery<T> {
-    receiver: UnboundedReceiver<T>,
+    receiver: UnboundedReceiver<UnwindResult<T>>,
     _on_drop: DropGuard,
 }
 
@@ -61,7 +63,11 @@ impl<T: 'static> Stream for BoundedTreeNursery<T> {
     ///
     /// If a task panics, this method resumes unwinding the panic.
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<T>> {
-        self.receiver.poll_recv(cx)
+        match ready!(self.receiver.poll_recv(cx)) {
+            Some(Ok(r)) => Some(r).into(),
+            Some(Err(e)) => std::panic::resume_unwind(e),
+            None => None.into(),
+        }
     }
 }
 
@@ -69,7 +75,7 @@ impl<T: 'static> Stream for BoundedTreeNursery<T> {
 #[derive(Debug)]
 pub(crate) struct Spawner<T> {
     semaphore: Arc<Semaphore>,
-    sender: UnboundedSender<T>,
+    sender: UnboundedSender<UnwindResult<T>>,
     token: CancellationToken,
 }
 
@@ -115,7 +121,7 @@ impl<T: Send + 'static> Spawner<T> {
         tokio::spawn(async move {
             tokio::select!(
                 () = token.cancelled() => (),
-                r = fut => {
+                r = std::panic::AssertUnwindSafe(fut).catch_unwind() => {
                     let _ = sender.send(r);
                 }
             );
