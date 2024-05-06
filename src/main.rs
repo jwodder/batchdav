@@ -71,9 +71,9 @@ async fn main() -> anyhow::Result<()> {
             for workers in workers_list {
                 let mut times = Vec::new();
                 for i in 1..=samples.into() {
-                    let TraversalReport { elapsed, .. } =
+                    let TraversalReport { requests, elapsed } =
                         traverse(client.clone(), base_url.clone(), workers, true).await?;
-                    eprintln!("Finished: workers = {workers}, run = {i}, elapsed = {elapsed:?}");
+                    eprintln!("Finished: workers = {workers}, run = {i}, requests = {requests}, elapsed = {elapsed:?}");
                     times.push(elapsed.as_secs_f64());
                 }
                 let data = Data::new(times);
