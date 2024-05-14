@@ -38,17 +38,16 @@ impl<T: Send + 'static> BoundedTreeNursery<T> {
     {
         let semaphore = Arc::new(Semaphore::new(limit));
         let token = CancellationToken::new();
-        let on_drop = token.clone().drop_guard();
         let (sender, receiver) = unbounded_channel();
         let spawner = Spawner {
             semaphore,
             sender,
-            token,
+            token: token.child_token(),
         };
         spawner.spawn_with_self(root);
         BoundedTreeNursery {
             receiver,
-            _on_drop: on_drop,
+            _on_drop: token.drop_guard(),
         }
     }
 }
