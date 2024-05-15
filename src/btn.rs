@@ -1,6 +1,9 @@
-use futures_util::{FutureExt, Stream};
+use futures_util::{
+    future::{select, Either},
+    FutureExt, Stream,
+};
 use std::future::Future;
-use std::pin::Pin;
+use std::pin::{pin, Pin};
 use std::sync::Arc;
 use std::task::{ready, Context, Poll};
 use tokio::sync::{
@@ -118,12 +121,14 @@ impl<T: Send + 'static> Spawner<T> {
             func(self).await
         };
         tokio::spawn(async move {
-            tokio::select!(
-                () = token.cancelled() => (),
-                r = std::panic::AssertUnwindSafe(fut).catch_unwind() => {
+            let cancellation = token.cancelled_owned();
+            let task = std::panic::AssertUnwindSafe(fut).catch_unwind();
+            match select(pin!(cancellation), pin!(task)).await {
+                Either::Left(((), _)) => (),
+                Either::Right((r, _)) => {
                     let _ = sender.send(r);
                 }
-            );
+            }
         });
     }
 }
