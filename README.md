@@ -49,14 +49,18 @@ resource's URL redirects to.
 `batch`
 -------
 
-    batchdav batch [-s|--samples <int>] <url> <workers> ...
+    batchdav batch [-s|--samples <int>] [-T|--per-traversal-stats] <url> <workers> ...
 
 Traverse the WebDAV hierarchy at the given URL repeatedly and summarize the
 elapsed times.  For each number of workers listed on the command line, a
 traversal is performed a number of times given by the `--samples` option
-(default: 10).  Upon completion, a CSV document listing the mean & standard
-deviation of the times for each number of workers is output.
+(default: 10).
 
+By default, upon completion, a CSV document listing the mean & standard
+deviation of the traversal times for each number of workers is output.  If the
+`-T`/`--per-traversal-stats` option is given, then the command's output will
+instead be a CSV with one line for each traversal, giving the number of
+workers, number of requests made, and elapsed time in seconds.
 
 Sample Results
 ==============

@@ -7,6 +7,7 @@ use crate::client::Client;
 use clap::{Parser, Subcommand};
 use futures_util::{future::BoxFuture, FutureExt, TryStreamExt};
 use statrs::statistics::{Data, Distribution};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::num::NonZeroUsize;
 use std::time::{Duration, Instant};
@@ -36,6 +37,11 @@ enum Command {
 
     /// Traverse a hierarchy multiple times and summarize the results
     Batch {
+        /// Emit a CSV line for each traversal rather than for each set of
+        /// traversals per worker quantity
+        #[arg(short = 'T', long)]
+        per_traversal_stats: bool,
+
         /// Number of traversals to make for each number of workers
         #[arg(short, long, default_value = "10")]
         samples: NonZeroUsize,
@@ -62,33 +68,25 @@ async fn main() -> anyhow::Result<()> {
             println!("Performed {requests} requests with {workers} workers in {elapsed:?}");
         }
         Command::Batch {
+            per_traversal_stats,
             samples,
             base_url,
             workers_list,
         } => {
             let client = Client::new(base_url.clone())?;
-            let mut stats = Vec::new();
+            let mut statter = if per_traversal_stats {
+                BatchStatter::per_traversal()
+            } else {
+                BatchStatter::per_workers()
+            };
+            statter.start();
             for workers in workers_list {
-                let mut times = Vec::new();
-                for i in 1..=samples.into() {
-                    let TraversalReport { requests, elapsed } =
-                        traverse(client.clone(), base_url.clone(), workers, true).await?;
-                    eprintln!("Finished: workers = {workers}, run = {i}, requests = {requests}, elapsed = {elapsed:?}");
-                    times.push(elapsed.as_secs_f64());
+                for _ in 0..samples.get() {
+                    let report = traverse(client.clone(), base_url.clone(), workers, true).await?;
+                    statter.process(workers, report);
                 }
-                let data = Data::new(times);
-                let mean = data
-                    .mean()
-                    .expect("mean should exist for nonzero number of samples");
-                let stddev = data
-                    .std_dev()
-                    .expect("stddev should exist for nonzero number of samples");
-                stats.push((workers, mean, stddev));
             }
-            println!("workers,time_mean,time_stddev");
-            for (workers, time_mean, time_stddev) in stats {
-                println!("{workers},{time_mean},{time_stddev}");
-            }
+            statter.end();
         }
     }
     Ok(())
@@ -167,4 +165,67 @@ fn process_dir(
 async fn process_file(client: Client, url: Url) -> anyhow::Result<Report> {
     let target = client.get_file_redirect(url.clone()).await?;
     Ok(Report::File { url, target })
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum BatchStatter {
+    PerTraversal,
+    PerWorkers {
+        worker_runtimes: BTreeMap<usize, Vec<f64>>,
+    },
+}
+
+impl BatchStatter {
+    fn per_traversal() -> Self {
+        BatchStatter::PerTraversal
+    }
+
+    fn per_workers() -> Self {
+        BatchStatter::PerWorkers {
+            worker_runtimes: BTreeMap::new(),
+        }
+    }
+
+    fn start(&self) {
+        match self {
+            BatchStatter::PerTraversal => println!("workers,requests,elapsed"),
+            BatchStatter::PerWorkers { .. } => (),
+        }
+    }
+
+    fn process(&mut self, workers: usize, TraversalReport { requests, elapsed }: TraversalReport) {
+        match self {
+            BatchStatter::PerTraversal => {
+                println!(
+                    "{workers},{requests},{elapsed}",
+                    elapsed = elapsed.as_secs_f64()
+                );
+            }
+            BatchStatter::PerWorkers { worker_runtimes } => {
+                let timelist = worker_runtimes.entry(workers).or_default();
+                timelist.push(elapsed.as_secs_f64());
+                let i = timelist.len();
+                eprintln!("Finished: workers = {workers}, run = {i}, requests = {requests}, elapsed = {elapsed:?}");
+            }
+        }
+    }
+
+    fn end(self) {
+        match self {
+            BatchStatter::PerTraversal => (),
+            BatchStatter::PerWorkers { worker_runtimes } => {
+                println!("workers,time_mean,time_stddev");
+                for (workers, runtimes) in worker_runtimes {
+                    let data = Data::new(runtimes);
+                    let mean = data
+                        .mean()
+                        .expect("mean should exist for nonzero number of samples");
+                    let stddev = data
+                        .std_dev()
+                        .expect("stddev should exist for nonzero number of samples");
+                    println!("{workers},{mean},{stddev}");
+                }
+            }
+        }
+    }
 }
