@@ -1,9 +1,11 @@
 mod btn;
 mod client;
+mod show_duration;
 mod traverse;
 mod types;
 mod xml;
 use crate::client::Client;
+use crate::show_duration::show_duration_as_seconds;
 use crate::traverse::{traverse, TraversalReport};
 use clap::{Parser, Subcommand};
 use statrs::statistics::{Data, Distribution};
@@ -121,7 +123,7 @@ impl BatchStatter {
             BatchStatter::PerTraversal => {
                 println!(
                     "{workers},{requests},{elapsed}",
-                    elapsed = elapsed.as_secs_f64()
+                    elapsed = show_duration_as_seconds(elapsed),
                 );
             }
             BatchStatter::PerWorkers { worker_runtimes } => {
