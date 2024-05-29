@@ -3,6 +3,7 @@ use crate::xml::parse_multistatus;
 use indoc::indoc;
 use mime::Mime;
 use reqwest::Method;
+use std::time::{Duration, Instant};
 use thiserror::Error;
 use url::Url;
 
@@ -50,7 +51,11 @@ impl Client {
     }
 
     // Assume `url` has `base_url` as a prefix
-    pub(crate) async fn list_directory(&self, url: Url) -> anyhow::Result<DirectoryListing<Url>> {
+    pub(crate) async fn list_directory(
+        &self,
+        url: Url,
+    ) -> anyhow::Result<(DirectoryListing<Url>, Duration)> {
+        let start = Instant::now();
         let r = self
             .inner
             .request(self.propfind.clone(), url.clone())
@@ -62,22 +67,30 @@ impl Client {
             .error_for_status()?;
         let charset = get_charset(&r);
         let resp = r.bytes().await?;
+        let elapsed = start.elapsed();
         let mut dl = parse_multistatus(resp, charset)?.paths_to_urls(&self.base_url);
         dl.directories.retain(|u| !is_collection_url(&url, u));
-        Ok(dl)
+        Ok((dl, elapsed))
     }
 
     // Assume `url` has `base_url` as a prefix
-    pub(crate) async fn get_file_redirect(&self, url: Url) -> anyhow::Result<Option<Url>> {
+    pub(crate) async fn get_file_redirect(
+        &self,
+        url: Url,
+    ) -> anyhow::Result<(Option<Url>, Duration)> {
+        let start = Instant::now();
         let r = self.inner.head(url).send().await?.error_for_status()?;
-        let Some(loc) = r.headers().get(reqwest::header::LOCATION) else {
-            return Ok(None);
+        let locvalue = r.headers().get(reqwest::header::LOCATION).cloned();
+        let _ = r.bytes().await?;
+        let elapsed = start.elapsed();
+        let Some(loc) = locvalue else {
+            return Ok((None, elapsed));
         };
         let Ok(loc) = loc.to_str() else {
             anyhow::bail!("Could not decode Location header value: {loc:?}");
         };
         match Url::parse(loc) {
-            Ok(loc) => Ok(Some(loc)),
+            Ok(loc) => Ok((Some(loc), elapsed)),
             Err(_) => anyhow::bail!("Location header value is not a valid URL: {loc:?}"),
         }
     }

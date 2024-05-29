@@ -1,6 +1,7 @@
 use crate::btn::{BoundedTreeNursery, Spawner};
 use crate::client::Client;
 use futures_util::{future::BoxFuture, FutureExt, TryStreamExt};
+use serde::Serialize;
 use std::fmt;
 use std::time::{Duration, Instant};
 use url::Url;
@@ -15,40 +16,68 @@ pub(crate) async fn traverse(
     let mut stream = BoundedTreeNursery::new(workers, move |spawner| {
         process_dir(spawner, client, base_url)
     });
-    let mut requests = 0;
+    let mut directory_request_times = Vec::new();
+    let mut file_request_times = Vec::new();
     while let Some(r) = stream.try_next().await? {
-        requests += 1;
         if !quiet {
             println!("{r}");
         }
+        match r {
+            Report::Dir { elapsed, .. } => directory_request_times.push(elapsed),
+            Report::File { elapsed, .. } => file_request_times.push(elapsed),
+        }
     }
     Ok(TraversalReport {
-        requests,
-        elapsed: start.elapsed(),
+        workers,
+        directory_request_times,
+        file_request_times,
+        overall_time: start.elapsed(),
     })
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(crate) struct TraversalReport {
-    pub(crate) requests: usize,
-    pub(crate) elapsed: Duration,
+    pub(crate) workers: usize,
+    pub(crate) directory_request_times: Vec<Duration>,
+    pub(crate) file_request_times: Vec<Duration>,
+    pub(crate) overall_time: Duration,
+}
+
+impl TraversalReport {
+    pub(crate) fn requests(&self) -> usize {
+        self.directory_request_times
+            .len()
+            .saturating_add(self.file_request_times.len())
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Report {
-    Dir(Url),
-    File { url: Url, target: Option<Url> },
+    Dir {
+        url: Url,
+        elapsed: Duration,
+    },
+    File {
+        url: Url,
+        elapsed: Duration,
+        target: Option<Url>,
+    },
 }
 
 impl fmt::Display for Report {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Report::Dir(url) => write!(f, "DIR: {url}"),
-            Report::File { url, target: None } => write!(f, "FILE: {url} => <NOT A REDIRECT>"),
+            Report::Dir { url, elapsed } => write!(f, "DIR: {url} ({elapsed:?})"),
             Report::File {
                 url,
+                elapsed,
+                target: None,
+            } => write!(f, "FILE: {url} => <NOT A REDIRECT> ({elapsed:?})"),
+            Report::File {
+                url,
+                elapsed,
                 target: Some(t),
-            } => write!(f, "FILE: {url} => {t}"),
+            } => write!(f, "FILE: {url} => {t} ({elapsed:?})"),
         }
     }
 }
@@ -61,7 +90,7 @@ fn process_dir(
     // We need to return a boxed Future in order to be able to call
     // `process_dir()` inside itself.
     async move {
-        let dl = client.list_directory(url.clone()).await?;
+        let (dl, elapsed) = client.list_directory(url.clone()).await?;
         for d in dl.directories {
             let cl2 = client.clone();
             spawner.spawn(move |spawner| process_dir(spawner, cl2, d));
@@ -70,12 +99,16 @@ fn process_dir(
             let cl2 = client.clone();
             spawner.spawn(move |_spawner| process_file(cl2, f));
         }
-        Ok(Report::Dir(url))
+        Ok(Report::Dir { url, elapsed })
     }
     .boxed()
 }
 
 async fn process_file(client: Client, url: Url) -> anyhow::Result<Report> {
-    let target = client.get_file_redirect(url.clone()).await?;
-    Ok(Report::File { url, target })
+    let (target, elapsed) = client.get_file_redirect(url.clone()).await?;
+    Ok(Report::File {
+        url,
+        elapsed,
+        target,
+    })
 }
