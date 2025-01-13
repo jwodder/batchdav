@@ -2,7 +2,7 @@ use crate::types::DirectoryListing;
 use bytes::{Buf, Bytes};
 use thiserror::Error;
 use winnow::{
-    combinator::{delimited, opt, preceded, repeat, seq},
+    combinator::{alt, delimited, opt, preceded, repeat, seq},
     error::{ContextError, ErrMode, ErrorKind, ParserError},
     stream::{Compare, CompareResult, SliceLen},
     token::literal,
@@ -89,7 +89,8 @@ fn tokenize(blob: Bytes, charset: Option<String>) -> Result<Vec<Token>, XmlToken
 
 /*
 For reference: Relevant DTD fragments from
-<http://www.webdav.org/specs/rfc4918.html#xml.element.definitions>:
+<http://www.webdav.org/specs/rfc4918.html#xml.element.definitions>.  Note that
+the actual text of the RFC states that the order of elements doesn't matter.
 
     <!ELEMENT multistatus (response*, responsedescription?)>
     <!ELEMENT response (href, ((href*, status)|(propstat+)),
@@ -101,12 +102,27 @@ For reference: Relevant DTD fragments from
     <!ELEMENT error ANY>
     <!ELEMENT responsedescription (#PCDATA)>
     <!ELEMENT location (href)>
+
+The responses that we'll be receiving match the following subset of the above
+(again, element order is irrelevant):
+
+    <!ELEMENT multistatus (response*, responsedescription?)>
+    <!ELEMENT response (href, propstat+, responsedescription?, location?)>
+    <!ELEMENT href (#PCDATA)>
+    <!ELEMENT propstat (prop, status, responsedescription?)>
+    <!ELEMENT prop (resourcetype)>
+    <!ELEMENT resourcetype (collection?)>
+    <!ELEMENT collection EMPTY>
+    <!ELEMENT status (#PCDATA)>
+    <!ELEMENT responsedescription (#PCDATA)>
+    <!ELEMENT location (href)>
+
 */
 
 fn parse(tokens: Vec<Token>) -> Result<DirectoryListing<String>, FromXmlError> {
-    let (responses,): (Vec<Response>,) = seq!(
+    let (responses,): (Vec<Option<Response>>,) = seq!(
         _: open("multistatus"),
-        repeat(0.., preceded(extensions, response)),
+        repeat(0.., preceded(extensions, alt((response.map(Some), responsedescription.map(|()| None))))),
         _: extensions,
         _: close("multistatus"),
     )
@@ -114,7 +130,7 @@ fn parse(tokens: Vec<Token>) -> Result<DirectoryListing<String>, FromXmlError> {
     .map_err(|_| FromXmlError::Parse)?;
     let mut directories = Vec::new();
     let mut files = Vec::new();
-    for r in responses {
+    for r in responses.into_iter().flatten() {
         if !is_ok(&r.status) {
             return Err(FromXmlError::BadStatus {
                 href: r.href,
@@ -152,38 +168,55 @@ struct Response {
     status: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ResponseChild {
+    Href(String),
+    Propstat(Propstat),
+    Discard,
+}
+
 fn response(input: &mut TokenStream<'_>) -> PResult<Response> {
-    // TODO: Support (href*, status) in lieu of propstat+ (What does the former
-    // even mean?)
-    let (href, propstats): (_, Vec<Propstat>) = seq!(
+    let (children,): (Vec<ResponseChild>,) = seq!(
         _: open("response"),
-        _: extensions,
-        href_tag,
-        repeat(1.., preceded(extensions, propstat)),
-        _: extensions,
-        // <error> tags cannot be present in responses to the kind of requests
-        // we're making, so don't bother with them.
-        //_: opt(error_tag),
-        //_: extensions,
-        _: opt(responsedescription),
-        _: extensions,
-        _: opt(location),
+        repeat(0.., preceded(extensions, alt((
+            href_tag.map(ResponseChild::Href),
+            propstat.map(ResponseChild::Propstat),
+            responsedescription.map(|()| ResponseChild::Discard),
+            location.map(|()| ResponseChild::Discard),
+        )))),
         _: extensions,
         _: close("response"),
     )
     .parse_next(input)?;
-    if let Some((is_collection, status)) = propstats
-        .into_iter()
-        .find_map(|ps| ps.is_collection.map(|c| (c, ps.status)))
-    {
-        Ok(Response {
-            href,
-            is_collection,
-            status,
-        })
-    } else {
-        hard_fail(input)
+    let mut href = None;
+    let mut is_collection: Option<bool> = None;
+    let mut status = None;
+    for child in children {
+        match child {
+            ResponseChild::Href(value) => {
+                if href.replace(value).is_some() {
+                    return hard_fail(input);
+                }
+            }
+            ResponseChild::Propstat(ps) => {
+                if let Some(yesno) = ps.is_collection {
+                    if is_collection.replace(yesno).is_some() {
+                        return hard_fail(input);
+                    }
+                    status = Some(ps.status);
+                }
+            }
+            ResponseChild::Discard => (),
+        }
     }
+    let Some(((href, is_collection), status)) = href.zip(is_collection).zip(status) else {
+        return hard_fail(input);
+    };
+    Ok(Response {
+        href,
+        is_collection,
+        status,
+    })
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -192,25 +225,47 @@ struct Propstat {
     status: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum PropstatChild {
+    IsCollection(bool),
+    Status(String),
+    Discard,
+}
+
 fn propstat(input: &mut TokenStream<'_>) -> PResult<Propstat> {
-    let (prop, status) = seq!(
+    let (children,): (Vec<PropstatChild>,) = seq!(
         _: open("propstat"),
-        _: extensions,
-        prop_tag,
-        _: extensions,
-        status_tag,
-        _: extensions,
-        // <error> tags cannot be present in responses to the kind of requests
-        // we're making, so don't bother with them.
-        //_: opt(error_tag),
-        //_: extensions,
-        _: opt(responsedescription),
+        repeat(0.., preceded(extensions, alt((
+            prop_tag.map(|Prop {is_collection}| PropstatChild::IsCollection(is_collection)),
+            status_tag.map(PropstatChild::Status),
+            responsedescription.map(|()| PropstatChild::Discard),
+        )))),
         _: extensions,
         _: close("propstat"),
     )
     .parse_next(input)?;
+    let mut is_collection = None;
+    let mut status = None;
+    for child in children {
+        match child {
+            PropstatChild::IsCollection(yesno) => {
+                if is_collection.replace(yesno).is_some() {
+                    return hard_fail(input);
+                }
+            }
+            PropstatChild::Status(s) => {
+                if status.replace(s).is_some() {
+                    return hard_fail(input);
+                }
+            }
+            PropstatChild::Discard => (),
+        }
+    }
+    let Some((is_collection, status)) = is_collection.zip(status) else {
+        return hard_fail(input);
+    };
     Ok(Propstat {
-        is_collection: Some(prop.is_collection),
+        is_collection: Some(is_collection),
         status,
     })
 }
@@ -357,6 +412,7 @@ pub(crate) enum XmlTokenizeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use indoc::indoc;
 
     #[test]
     fn test01() {
@@ -380,5 +436,264 @@ mod tests {
                 "/zarrs/0d5/b9b/0d5b9be5-e626-4f6a-96da-b6b602954899/0395d0a3767524377b58da3945b3c063-48379--27115470.zarr/info".into(),
             ],
         });
+    }
+
+    #[test]
+    fn test_reverse_order() {
+        let src = indoc! {r#"
+            <?xml version="1.0" encoding="utf-8"?>
+            <multistatus xmlns="DAV:">
+                <responsedescription>Your requested stats, sire.</responsedescription>
+                <response>
+                    <responsedescription>These are the properties of /foo/bar/.</responsedescription>
+                    <propstat>
+                        <responsedescription>/foo/bar/ is a directory.</responsedescription>
+                        <status>HTTP/1.1 200 OK</status>
+                        <prop>
+                            <resourcetype>
+                                <collection />
+                            </resourcetype>
+                        </prop>
+                    </propstat>
+                    <href>/foo/bar/</href>
+                </response>
+            </multistatus>
+        "#};
+        let dl = parse_multistatus(Bytes::from(src.as_bytes()), None).unwrap();
+        assert_eq!(
+            dl,
+            DirectoryListing {
+                directories: vec!["/foo/bar/".into()],
+                files: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_reverse_order_no_descriptions() {
+        let src = indoc! {r#"
+            <?xml version="1.0" encoding="utf-8"?>
+            <multistatus xmlns="DAV:">
+                <response>
+                    <propstat>
+                        <status>HTTP/1.1 200 OK</status>
+                        <prop>
+                            <resourcetype>
+                                <collection />
+                            </resourcetype>
+                        </prop>
+                    </propstat>
+                    <href>/foo/bar/</href>
+                </response>
+            </multistatus>
+        "#};
+        let dl = parse_multistatus(Bytes::from(src.as_bytes()), None).unwrap();
+        assert_eq!(
+            dl,
+            DirectoryListing {
+                directories: vec!["/foo/bar/".into()],
+                files: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_no_href() {
+        let src = indoc! {r#"
+            <?xml version="1.0" encoding="utf-8"?>
+            <multistatus xmlns="DAV:">
+                <response>
+                    <propstat>
+                        <status>HTTP/1.1 200 OK</status>
+                        <prop>
+                            <resourcetype>
+                                <collection />
+                            </resourcetype>
+                        </prop>
+                    </propstat>
+                </response>
+            </multistatus>
+        "#};
+        assert!(parse_multistatus(Bytes::from(src.as_bytes()), None).is_err());
+    }
+
+    #[test]
+    fn test_no_propstat() {
+        let src = indoc! {r#"
+            <?xml version="1.0" encoding="utf-8"?>
+            <multistatus xmlns="DAV:">
+                <response>
+                    <href>/foo/bar/</href>
+                </response>
+            </multistatus>
+        "#};
+        assert!(parse_multistatus(Bytes::from(src.as_bytes()), None).is_err());
+    }
+
+    #[test]
+    fn test_no_status() {
+        let src = indoc! {r#"
+            <?xml version="1.0" encoding="utf-8"?>
+            <multistatus xmlns="DAV:">
+                <response>
+                    <propstat>
+                        <prop>
+                            <resourcetype>
+                                <collection />
+                            </resourcetype>
+                        </prop>
+                    </propstat>
+                    <href>/foo/bar/</href>
+                </response>
+            </multistatus>
+        "#};
+        assert!(parse_multistatus(Bytes::from(src.as_bytes()), None).is_err());
+    }
+
+    #[test]
+    fn test_no_prop() {
+        let src = indoc! {r#"
+            <?xml version="1.0" encoding="utf-8"?>
+            <multistatus xmlns="DAV:">
+                <response>
+                    <propstat>
+                        <status>HTTP/1.1 200 OK</status>
+                    </propstat>
+                    <href>/foo/bar/</href>
+                </response>
+            </multistatus>
+        "#};
+        assert!(parse_multistatus(Bytes::from(src.as_bytes()), None).is_err());
+    }
+
+    #[test]
+    fn test_no_resourcetype() {
+        let src = indoc! {r#"
+            <?xml version="1.0" encoding="utf-8"?>
+            <multistatus xmlns="DAV:">
+                <response>
+                    <propstat>
+                        <status>HTTP/1.1 200 OK</status>
+                        <prop/>
+                    </propstat>
+                    <href>/foo/bar/</href>
+                </response>
+            </multistatus>
+        "#};
+        assert!(parse_multistatus(Bytes::from(src.as_bytes()), None).is_err());
+    }
+
+    #[test]
+    fn test_multi_href() {
+        let src = indoc! {r#"
+            <?xml version="1.0" encoding="utf-8"?>
+            <multistatus xmlns="DAV:">
+                <response>
+                    <href>/foo/bar</href>
+                    <propstat>
+                        <status>HTTP/1.1 200 OK</status>
+                        <prop>
+                            <resourcetype>
+                                <collection />
+                            </resourcetype>
+                        </prop>
+                    </propstat>
+                    <href>/foo/bar/</href>
+                </response>
+            </multistatus>
+        "#};
+        assert!(parse_multistatus(Bytes::from(src.as_bytes()), None).is_err());
+    }
+
+    #[test]
+    fn test_multi_status() {
+        let src = indoc! {r#"
+            <?xml version="1.0" encoding="utf-8"?>
+            <multistatus xmlns="DAV:">
+                <response>
+                    <propstat>
+                        <status>HTTP/1.1 200 OK</status>
+                        <status>All good</status>
+                        <prop>
+                            <resourcetype>
+                                <collection />
+                            </resourcetype>
+                        </prop>
+                    </propstat>
+                    <href>/foo/bar/</href>
+                </response>
+            </multistatus>
+        "#};
+        assert!(parse_multistatus(Bytes::from(src.as_bytes()), None).is_err());
+    }
+
+    #[test]
+    fn test_multi_resourcetype() {
+        let src = indoc! {r#"
+            <?xml version="1.0" encoding="utf-8"?>
+            <multistatus xmlns="DAV:">
+                <response>
+                    <propstat>
+                        <status>HTTP/1.1 200 OK</status>
+                        <prop>
+                            <resourcetype>
+                                <collection />
+                            </resourcetype>
+                            <resourcetype>
+                                <directory xmlns="https://www.example.com" />
+                            </resourcetype>
+                        </prop>
+                    </propstat>
+                    <href>/foo/bar/</href>
+                </response>
+            </multistatus>
+        "#};
+        assert!(parse_multistatus(Bytes::from(src.as_bytes()), None).is_err());
+    }
+
+    #[test]
+    fn test_multi_prop() {
+        let src = indoc! {r#"
+            <?xml version="1.0" encoding="utf-8"?>
+            <multistatus xmlns="DAV:">
+                <response>
+                    <propstat>
+                        <status>HTTP/1.1 200 OK</status>
+                        <prop>
+                            <resourcetype>
+                                <collection />
+                            </resourcetype>
+                        </prop>
+                        <prop>
+                            <resourcetype/>
+                        </prop>
+                    </propstat>
+                    <href>/foo/bar/</href>
+                </response>
+            </multistatus>
+        "#};
+        assert!(parse_multistatus(Bytes::from(src.as_bytes()), None).is_err());
+    }
+
+    #[test]
+    fn test_multi_collection() {
+        let src = indoc! {r#"
+            <?xml version="1.0" encoding="utf-8"?>
+            <multistatus xmlns="DAV:">
+                <response>
+                    <propstat>
+                        <status>HTTP/1.1 200 OK</status>
+                        <prop>
+                            <resourcetype>
+                                <collection />
+                                <collection />
+                            </resourcetype>
+                        </prop>
+                    </propstat>
+                    <href>/foo/bar/</href>
+                </response>
+            </multistatus>
+        "#};
+        assert!(parse_multistatus(Bytes::from(src.as_bytes()), None).is_err());
     }
 }
