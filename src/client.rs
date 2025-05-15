@@ -104,6 +104,7 @@ fn is_collection_url(colurl: &Url, url: &Url) -> bool {
     colurl.as_str().trim_end_matches('/') == url.as_str().trim_end_matches('/')
 }
 
+#[allow(clippy::return_and_then)]
 fn get_charset(r: &reqwest::Response) -> Option<String> {
     r.headers()
         .get(reqwest::header::CONTENT_TYPE)
