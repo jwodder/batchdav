@@ -1,8 +1,8 @@
-mod btn;
 mod client;
 mod show_duration;
 mod traverse;
 mod types;
+mod worker_nursery;
 mod xml;
 use crate::client::Client;
 use crate::show_duration::show_duration_as_seconds;
@@ -38,7 +38,7 @@ enum Command {
         base_url: Url,
 
         /// Maximum number of tasks to have active at once
-        workers: usize,
+        workers: NonZeroUsize,
     },
 
     /// Traverse a hierarchy multiple times and summarize the results
@@ -59,7 +59,7 @@ enum Command {
         base_url: Url,
 
         /// Varying worker amounts to run the traversal with
-        workers_list: Vec<usize>,
+        workers_list: Vec<NonZeroUsize>,
     },
 }
 
@@ -116,7 +116,7 @@ enum StatManager {
     },
     PerTraversal,
     PerWorkers {
-        worker_runtimes: BTreeMap<usize, Vec<f64>>,
+        worker_runtimes: BTreeMap<NonZeroUsize, Vec<f64>>,
     },
 }
 
