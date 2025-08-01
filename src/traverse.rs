@@ -1,21 +1,22 @@
-use crate::btn::{BoundedTreeNursery, Spawner};
 use crate::client::Client;
+use crate::worker_nursery::WorkerNursery;
 use futures_util::{future::BoxFuture, FutureExt, TryStreamExt};
 use serde::Serialize;
 use std::fmt;
+use std::num::NonZeroUsize;
 use std::time::{Duration, Instant};
 use url::Url;
 
 pub(crate) async fn traverse(
     client: Client,
     base_url: Url,
-    workers: usize,
+    workers: NonZeroUsize,
     quiet: bool,
 ) -> anyhow::Result<TraversalReport> {
     let start = Instant::now();
-    let mut stream = BoundedTreeNursery::new(workers, move |spawner| {
-        process_dir(spawner, client, base_url)
-    });
+    let (spawner, mut stream) = WorkerNursery::new(workers);
+    let sub_spawner = spawner.clone();
+    spawner.spawn(async move { process_dir(sub_spawner, client, base_url).await })?;
     let mut directory_request_times = Vec::new();
     let mut file_request_times = Vec::new();
     while let Some(r) = stream.try_next().await? {
@@ -37,7 +38,7 @@ pub(crate) async fn traverse(
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(crate) struct TraversalReport {
-    pub(crate) workers: usize,
+    pub(crate) workers: NonZeroUsize,
     pub(crate) directory_request_times: Vec<Duration>,
     pub(crate) file_request_times: Vec<Duration>,
     pub(crate) overall_time: Duration,
@@ -83,7 +84,7 @@ impl fmt::Display for Report {
 }
 
 fn process_dir(
-    spawner: Spawner<anyhow::Result<Report>>,
+    spawner: WorkerNursery<anyhow::Result<Report>>,
     client: Client,
     url: Url,
 ) -> BoxFuture<'static, anyhow::Result<Report>> {
@@ -93,11 +94,12 @@ fn process_dir(
         let (dl, elapsed) = client.list_directory(url.clone()).await?;
         for d in dl.directories {
             let cl2 = client.clone();
-            spawner.spawn(move |spawner| process_dir(spawner, cl2, d));
+            let sub_spawner = spawner.clone();
+            spawner.spawn(async move { process_dir(sub_spawner, cl2, d).await })?;
         }
         for f in dl.files {
             let cl2 = client.clone();
-            spawner.spawn(move |_spawner| process_file(cl2, f));
+            spawner.spawn(async move { process_file(cl2, f).await })?;
         }
         Ok(Report::Dir { url, elapsed })
     }
